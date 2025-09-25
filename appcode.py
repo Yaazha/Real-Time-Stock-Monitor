@@ -10,12 +10,16 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ---------------------------
-# Hardcoded sender email for alerts
+# Email configuration
 # ---------------------------
-SENDER_EMAIL = "stockdashboardteam@gmail.com"
-SENDER_PASSWORD = "eshr tuvc ypas poux"
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
+try:
+    SENDER_EMAIL = st.secrets["SENDER_EMAIL"]
+    SENDER_PASSWORD = st.secrets["SENDER_PASSWORD"]
+    SMTP_SERVER = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
+    SMTP_PORT = int(st.secrets.get("SMTP_PORT", 587))
+except Exception as e:
+    st.error("❌ Email configuration missing. Please set secrets in Streamlit Cloud.")
+    st.stop()
 
 st.set_page_config(page_title="Stock Dashboard", layout="wide")
 
@@ -177,7 +181,8 @@ with tab1:
             change_pct = (change / float(prev)) * 100 if float(prev) != 0 else 0
             
             col1, col2 = st.columns([2,1])
-            col1.metric(label=f"{symbol} Price", value=f"${price:.2f}", delta=f"{change_pct:.2f}%")
+            delta_color = "normal"  # ✅ Streamlit-friendly
+            col1.metric(label=f"{symbol} Price", value=f"${price:.2f}", delta=f"{change:.2f}", delta_color=delta_color)
             col2.write(f"Last refresh: {st.session_state.last_refresh or '—'}")
 
             # ---------------------------
@@ -186,18 +191,21 @@ with tab1:
             with st.expander("Set Instant Alert"):
                 alert_email = st.text_input("Enter your email for alert")
                 alert_price = st.number_input(f"Alert price for {symbol}", min_value=0.0, format="%.2f")
+                alert_type = st.radio("Alert type", ["Price rises to target", "Price falls to target"], key=f"alert_type_{symbol}")
+                
                 if st.button("Set Alert", key=f"alert_{symbol}"):
                     if alert_email and alert_price > 0:
                         alert_record = {
                             "id": len(st.session_state.alerts)+1,
                             "symbol": symbol,
                             "target_price": alert_price,
+                            "alert_type": alert_type,
                             "recipient_email": alert_email,
                             "triggered": False,
                             "created_at": datetime.utcnow().isoformat()
                         }
                         st.session_state.alerts.append(alert_record)
-                        st.success(f"Alert set for {symbol} at ${alert_price:.2f} to {alert_email}")
+                        st.success(f"Alert set for {symbol} at ${alert_price:.2f} ({alert_type}) to {alert_email}")
                     else:
                         st.warning("Enter valid email and price.")
 
@@ -251,7 +259,7 @@ with tab3:
     st.subheader("Alerts Manager")
     if st.session_state.alerts:
         df_alerts = pd.DataFrame(st.session_state.alerts)
-        st.dataframe(df_alerts[["id","symbol","target_price","recipient_email","triggered","created_at"]])
+        st.dataframe(df_alerts[["id","symbol","target_price","alert_type","recipient_email","triggered","created_at"]])
         c1, c2, c3 = st.columns(3)
         if c1.button("Remove all alerts"):
             st.session_state.alerts = []
@@ -285,7 +293,14 @@ def check_alerts_and_notify():
         if latest_df.empty:
             continue
         latest_price = float(latest_df["Close"].iloc[-1])
-        if latest_price >= float(alert["target_price"]):
+        trigger = False
+        
+        if alert["alert_type"] == "Price rises to target" and latest_price >= float(alert["target_price"]):
+            trigger = True
+        elif alert["alert_type"] == "Price falls to target" and latest_price <= float(alert["target_price"]):
+            trigger = True
+        
+        if trigger:
             alert["triggered"] = True
             alert["triggered_at"] = datetime.utcnow().isoformat()
             record = {
@@ -293,13 +308,15 @@ def check_alerts_and_notify():
                 "symbol": symbol,
                 "target_price": alert["target_price"],
                 "actual_price": latest_price,
+                "alert_type": alert["alert_type"],
                 "recipient_email": alert["recipient_email"],
                 "triggered_at": alert["triggered_at"]
             }
             st.session_state.alert_history.append(record)
-            st.toast(f"ALERT: {symbol} reached ${latest_price:.2f} (target {alert['target_price']:.2f})")
+            st.toast(f"ALERT: {symbol} {alert['alert_type']} — Current ${latest_price:.2f}")
+            
             # Email
-            subject = f"Stock Alert: {symbol} reached ${latest_price:.2f}"
+            subject = f"Stock Alert: {symbol} {alert['alert_type']}"
             body = f"Your alert for {symbol} was triggered.\nTarget: ${alert['target_price']:.2f}\nCurrent: ${latest_price:.2f}\nTime (UTC): {alert['triggered_at']}"
             success, err = send_email(alert["recipient_email"], subject, body)
             if success: st.success(f"Email sent to {alert['recipient_email']}")
